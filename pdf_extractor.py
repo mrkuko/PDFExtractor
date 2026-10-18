@@ -1,9 +1,7 @@
 """GUI nástroj: extrahuje každú stranu (slide) PDF do samostatného PNG obrázka."""
-import queue
 import shutil
 import subprocess
 import sys
-import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -60,7 +58,6 @@ class App(tk.Tk):
         self.out_var = tk.StringVar()
         self.dpi_var = tk.IntVar(value=150)
         self.status_var = tk.StringVar(value="Vyber PDF súbor.")
-        self.q: queue.Queue = queue.Queue()
 
         pad = {"padx": 10, "pady": 6}
         frm = ttk.Frame(self)
@@ -114,45 +111,40 @@ class App(tk.Tk):
             target = Path(f"{base}_{i}")
         target.mkdir(parents=True)
 
-        self.btn.config(state="disabled")
-        self.bar["value"] = 0
-        threading.Thread(target=self.work, args=(pdf, target, self.dpi_var.get()),
-                         daemon=True).start()
-        self.after(100, self.poll)
-
-    def work(self, pdf: Path, target: Path, dpi: int):
         try:
-            with pymupdf.open(pdf) as doc:
-                n = len(doc)
-                width = len(str(n))
-                for i, page in enumerate(doc, 1):
-                    page.get_pixmap(dpi=dpi).save(target / f"slide_{i:0{width}d}.png")
-                    self.q.put(("progress", i, n))
-            self.q.put(("done", n, target))
+            self.doc = pymupdf.open(pdf)
         except Exception as e:  # noqa: BLE001
-            self.q.put(("error", str(e)))
+            messagebox.showerror("Chyba", str(e))
+            return
+        self.target, self.dpi, self.idx = target, self.dpi_var.get(), 0
+        self.n = len(self.doc)
+        self.width = len(str(self.n))
+        self.btn.config(state="disabled")
+        self.bar.config(maximum=self.n, value=0)
+        self.status_var.set(f"Slide 0/{self.n}")
+        # Renderovanie po jednej strane v hlavnom vlákne: pymupdf drží GIL, takže
+        # pri samostatnom vlákne sa GUI neprekresľovalo až do konca.
+        self.after(10, self.step)
 
-    def poll(self):
+    def step(self):
         try:
-            while True:
-                msg = self.q.get_nowait()
-                if msg[0] == "progress":
-                    _, i, n = msg
-                    self.bar["maximum"], self.bar["value"] = n, i
-                    self.status_var.set(f"Slide {i}/{n}")
-                elif msg[0] == "done":
-                    self.btn.config(state="normal")
-                    self.status_var.set(f"Hotovo: {msg[1]} slidov → {msg[2]}")
-                    messagebox.showinfo("Hotovo", f"Uložených {msg[1]} slidov do:\n{msg[2]}")
-                    return
-                else:
-                    self.btn.config(state="normal")
-                    self.status_var.set("Chyba")
-                    messagebox.showerror("Chyba", msg[1])
-                    return
-        except queue.Empty:
-            pass
-        self.after(100, self.poll)
+            if self.idx < self.n:
+                self.idx += 1
+                page = self.doc[self.idx - 1]
+                page.get_pixmap(dpi=self.dpi).save(
+                    self.target / f"slide_{self.idx:0{self.width}d}.png")
+                self.bar["value"] = self.idx
+                self.status_var.set(f"Slide {self.idx}/{self.n}")
+                self.after(1, self.step)
+                return
+            self.doc.close()
+            self.btn.config(state="normal")
+            self.status_var.set(f"Hotovo: {self.n} slidov → {self.target}")
+            messagebox.showinfo("Hotovo", f"Uložených {self.n} slidov do:\n{self.target}")
+        except Exception as e:  # noqa: BLE001
+            self.btn.config(state="normal")
+            self.status_var.set("Chyba")
+            messagebox.showerror("Chyba", str(e))
 
 
 if __name__ == "__main__":
