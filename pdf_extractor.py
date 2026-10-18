@@ -59,7 +59,11 @@ def _render(pdf: str, idx: int, dpi: int, out: str):
     global _doc
     if _doc is None:
         _doc = pymupdf.open(pdf)
-    _doc[idx].get_pixmap(dpi=dpi, alpha=False).save(out)
+    pix = _doc[idx].get_pixmap(dpi=dpi, alpha=False)
+    if out.lower().endswith((".jpg", ".jpeg")):
+        pix.save(out, jpg_quality=92)
+    else:
+        pix.save(out)
     return idx
 
 
@@ -80,7 +84,7 @@ CONFIG = Path.home() / ".config" / "pdf_slide_extractor.json"
 
 TEXTS = {
     "en": {
-        "subtitle": "Saves every page of a PDF presentation as a PNG image.",
+        "subtitle": "Saves every page of a PDF presentation as an image.",
         "pdf": "PDF file", "pick_pdf": "Choose PDF",
         "out": "Destination folder", "pick_out": "Choose folder",
         "dpi": "Quality (DPI)", "run": "Extract slides",
@@ -88,10 +92,10 @@ TEXTS = {
         "done": "Done: {n} slides → {target}", "error": "Error: {e}",
         "open": "Open folder", "err_title": "Error",
         "bad_pdf": "Choose a valid PDF file.", "bad_out": "Choose a destination folder.",
-        "language": "Language", "theme": "Theme", "dark": "Dark", "light": "Light",
+        "language": "Language", "format": "Image format", "theme": "Theme", "dark": "Dark", "light": "Light",
     },
     "sk": {
-        "subtitle": "Každú stranu PDF prezentácie uloží ako PNG obrázok.",
+        "subtitle": "Každú stranu PDF prezentácie uloží ako obrázok.",
         "pdf": "PDF súbor", "pick_pdf": "Vybrať PDF",
         "out": "Cieľový priečinok", "pick_out": "Vybrať priečinok",
         "dpi": "Kvalita (DPI)", "run": "Extrahovať slidy",
@@ -99,10 +103,11 @@ TEXTS = {
         "done": "Hotovo: {n} slidov → {target}", "error": "Chyba: {e}",
         "open": "Otvoriť priečinok", "err_title": "Chyba",
         "bad_pdf": "Vyber platný PDF súbor.", "bad_out": "Vyber cieľový priečinok.",
-        "language": "Jazyk", "theme": "Vzhľad", "dark": "Tmavý", "light": "Svetlý",
+        "language": "Jazyk", "format": "Formát obrázka", "theme": "Vzhľad", "dark": "Tmavý", "light": "Svetlý",
     },
 }
 LANGS = {"English": "en", "Slovenčina": "sk"}
+FORMATS = ["png", "jpg", "jpeg"]
 
 
 def load_settings() -> dict:
@@ -111,7 +116,8 @@ def load_settings() -> dict:
     except (OSError, ValueError):
         d = {}
     return {"lang": d.get("lang", "en") if d.get("lang") in TEXTS else "en",
-            "theme": d.get("theme", "dark") if d.get("theme") in ("dark", "light") else "dark"}
+            "theme": d.get("theme", "dark") if d.get("theme") in ("dark", "light") else "dark",
+            "format": d.get("format", "png") if d.get("format") in FORMATS else "png"}
 
 
 def save_settings(d: dict):
@@ -128,7 +134,7 @@ class App(ctk.CTk):
         self.settings = load_settings()
         ctk.set_appearance_mode(self.settings["theme"])
         self.title("PDF Slide Extractor")
-        self.geometry("680x480")
+        self.geometry("680x500")
         self.minsize(560, 440)
         self.configure(fg_color=BG)
 
@@ -209,6 +215,7 @@ class App(ctk.CTk):
         self.set_status(key, color, **kw)
         self.lang_lbl.configure(text=self.t("language"))
         self.theme_lbl.configure(text=self.t("theme"))
+        self.fmt_lbl.configure(text=self.t("format"))
         names = [self.t("dark"), self.t("light")]
         self.theme_seg.configure(values=names)
         self.theme_seg.set(names[0 if self.settings["theme"] == "dark" else 1])
@@ -229,7 +236,14 @@ class App(ctk.CTk):
         self.theme_seg = ctk.CTkSegmentedButton(
             self.popup, values=["Dark", "Light"], command=self.on_theme,
             selected_color=ACCENT, selected_hover_color=ACCENT_HOVER)
-        self.theme_seg.pack(padx=16, pady=(0, 16), fill="x")
+        self.theme_seg.pack(padx=16, fill="x")
+        self.fmt_lbl = ctk.CTkLabel(self.popup, text_color=LABEL)
+        self.fmt_lbl.pack(anchor="w", padx=16, pady=(12, 2))
+        self.fmt_seg = ctk.CTkSegmentedButton(
+            self.popup, values=[f.upper() for f in FORMATS], command=self.on_format,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER)
+        self.fmt_seg.set(self.settings["format"].upper())
+        self.fmt_seg.pack(padx=16, pady=(0, 16), fill="x")
         self.popup_open = False
 
     def toggle_settings(self):
@@ -254,6 +268,10 @@ class App(ctk.CTk):
         self.settings["lang"] = LANGS[value]
         save_settings(self.settings)
         self.apply_language()
+
+    def on_format(self, value):
+        self.settings["format"] = value.lower()
+        save_settings(self.settings)
 
     def on_theme(self, value):
         self.settings["theme"] = "dark" if value == self.t("dark") else "light"
@@ -319,6 +337,7 @@ class App(ctk.CTk):
 
         width = len(str(self.n))
         dpi = int(self.dpi_var.get())
+        ext = self.settings["format"]
         self.btn.configure(state="disabled")
         self.open_btn.pack_forget()
         self.bar.set(0)
@@ -327,7 +346,7 @@ class App(ctk.CTk):
         self.pool = ProcessPoolExecutor(max_workers=min(os.cpu_count() or 2, self.n),
                                         mp_context=mp.get_context("spawn"))
         self.futs = [self.pool.submit(_render, str(pdf), i, dpi,
-                                      str(target / f"slide_{i + 1:0{width}d}.png"))
+                                      str(target / f"slide_{i + 1:0{width}d}.{ext}"))
                      for i in range(self.n)]
         self.after(50, self.poll)
 
