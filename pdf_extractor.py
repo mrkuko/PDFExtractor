@@ -1,11 +1,52 @@
 """GUI nástroj: extrahuje každú stranu (slide) PDF do samostatného PNG obrázka."""
 import queue
+import shutil
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import pymupdf
+
+
+def _linux_dialog(kind: str, start: str):
+    """Natívny dialóg na Linuxe cez zenity (GTK) alebo kdialog (KDE).
+
+    Vráti cestu, "" pri zrušení, alebo None ak nie je dostupný žiadny nástroj.
+    """
+    start = start or str(Path.home())
+    if shutil.which("zenity"):
+        cmd = ["zenity", "--file-selection", f"--filename={start.rstrip('/')}/"]
+        if kind == "file":
+            cmd += ["--file-filter=PDF | *.pdf *.PDF", "--file-filter=Všetky | *"]
+        else:
+            cmd.append("--directory")
+    elif shutil.which("kdialog"):
+        cmd = ["kdialog", "--getopenfilename" if kind == "file" else "--getexistingdirectory",
+               start] + (["*.pdf|PDF"] if kind == "file" else [])
+    else:
+        return None
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def choose_pdf(start: str = "") -> str:
+    # Windows a macOS: tkinter používa natívne dialógy OS
+    if sys.platform.startswith("linux"):
+        p = _linux_dialog("file", start)
+        if p is not None:
+            return p
+    return filedialog.askopenfilename(initialdir=start or None, filetypes=[("PDF", "*.pdf")])
+
+
+def choose_dir(start: str = "") -> str:
+    if sys.platform.startswith("linux"):
+        p = _linux_dialog("dir", start)
+        if p is not None:
+            return p
+    return filedialog.askdirectory(initialdir=start or None)
 
 
 class App(tk.Tk):
@@ -46,14 +87,14 @@ class App(tk.Tk):
         ttk.Label(frm, textvariable=self.status_var).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
 
     def pick_pdf(self):
-        p = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
+        p = choose_pdf(str(Path(self.pdf_var.get()).parent) if self.pdf_var.get() else "")
         if p:
             self.pdf_var.set(p)
             if not self.out_var.get():
                 self.out_var.set(str(Path(p).parent))
 
     def pick_out(self):
-        p = filedialog.askdirectory()
+        p = choose_dir(self.out_var.get())
         if p:
             self.out_var.set(p)
 
