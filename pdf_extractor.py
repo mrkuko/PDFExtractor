@@ -1,4 +1,6 @@
 """GUI nástroj: extrahuje každú stranu (slide) PDF do samostatného PNG obrázka."""
+import multiprocessing as mp
+import os
 import shutil
 import subprocess
 import sys
@@ -7,6 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import pymupdf
+from concurrent.futures import ProcessPoolExecutor
 
 
 def _linux_dialog(kind: str, start: str):
@@ -45,6 +48,18 @@ def choose_dir(start: str = "") -> str:
         if p is not None:
             return p
     return filedialog.askdirectory(initialdir=start or None)
+
+
+_doc = None
+
+
+def _render(pdf: str, idx: int, dpi: int, out: str):
+    """Beží v procese poolu; každý proces si otvorí PDF raz a renderuje svoje strany."""
+    global _doc
+    if _doc is None:
+        _doc = pymupdf.open(pdf)
+    _doc[idx].get_pixmap(dpi=dpi, alpha=False).save(out)
+    return idx
 
 
 class App(tk.Tk):
@@ -112,39 +127,43 @@ class App(tk.Tk):
         target.mkdir(parents=True)
 
         try:
-            self.doc = pymupdf.open(pdf)
+            with pymupdf.open(pdf) as doc:
+                self.n = len(doc)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Chyba", str(e))
             return
-        self.target, self.dpi, self.idx = target, self.dpi_var.get(), 0
-        self.n = len(self.doc)
-        self.width = len(str(self.n))
+        self.target = target
+        width = len(str(self.n))
+        dpi = self.dpi_var.get()
         self.btn.config(state="disabled")
         self.bar.config(maximum=self.n, value=0)
         self.status_var.set(f"Slide 0/{self.n}")
-        # Renderovanie po jednej strane v hlavnom vlákne: pymupdf drží GIL, takže
-        # pri samostatnom vlákne sa GUI neprekresľovalo až do konca.
-        self.after(10, self.step)
+        # Samostatné procesy (nie vlákna): pymupdf drží GIL, takže vlákna by nezrýchlili nič.
+        self.pool = ProcessPoolExecutor(max_workers=min(os.cpu_count() or 2, self.n),
+                                        mp_context=mp.get_context("spawn"))
+        self.futs = [self.pool.submit(_render, str(pdf), i, dpi,
+                                      str(target / f"slide_{i + 1:0{width}d}.png"))
+                     for i in range(self.n)]
+        self.after(50, self.poll)
 
-    def step(self):
+    def poll(self):
+        done = sum(f.done() for f in self.futs)
+        self.bar["value"] = done
+        self.status_var.set(f"Slide {done}/{self.n}")
+        if done < self.n:
+            self.after(50, self.poll)
+            return
+        self.pool.shutdown()
+        self.btn.config(state="normal")
         try:
-            if self.idx < self.n:
-                self.idx += 1
-                page = self.doc[self.idx - 1]
-                page.get_pixmap(dpi=self.dpi).save(
-                    self.target / f"slide_{self.idx:0{self.width}d}.png")
-                self.bar["value"] = self.idx
-                self.status_var.set(f"Slide {self.idx}/{self.n}")
-                self.after(1, self.step)
-                return
-            self.doc.close()
-            self.btn.config(state="normal")
-            self.status_var.set(f"Hotovo: {self.n} slidov → {self.target}")
-            messagebox.showinfo("Hotovo", f"Uložených {self.n} slidov do:\n{self.target}")
+            for f in self.futs:
+                f.result()
         except Exception as e:  # noqa: BLE001
-            self.btn.config(state="normal")
             self.status_var.set("Chyba")
             messagebox.showerror("Chyba", str(e))
+            return
+        self.status_var.set(f"Hotovo: {self.n} slidov → {self.target}")
+        messagebox.showinfo("Hotovo", f"Uložených {self.n} slidov do:\n{self.target}")
 
 
 if __name__ == "__main__":
