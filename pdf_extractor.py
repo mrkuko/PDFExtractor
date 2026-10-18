@@ -5,6 +5,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -92,7 +94,7 @@ TEXTS = {
         "done": "Done: {n} slides → {target}", "error": "Error: {e}",
         "open": "Open folder", "err_title": "Error",
         "bad_pdf": "Choose a valid PDF file.", "bad_out": "Choose a destination folder.",
-        "language": "Language", "format": "Image format", "theme": "Theme", "dark": "Dark", "light": "Light",
+        "language": "Language", "format": "Image format", "zip": "Export as ZIP file", "theme": "Theme", "dark": "Dark", "light": "Light",
     },
     "sk": {
         "subtitle": "Každú stranu PDF prezentácie uloží ako obrázok.",
@@ -103,7 +105,7 @@ TEXTS = {
         "done": "Hotovo: {n} slidov → {target}", "error": "Chyba: {e}",
         "open": "Otvoriť priečinok", "err_title": "Chyba",
         "bad_pdf": "Vyber platný PDF súbor.", "bad_out": "Vyber cieľový priečinok.",
-        "language": "Jazyk", "format": "Formát obrázka", "theme": "Vzhľad", "dark": "Tmavý", "light": "Svetlý",
+        "language": "Jazyk", "format": "Formát obrázka", "zip": "Exportovať ako ZIP súbor", "theme": "Vzhľad", "dark": "Tmavý", "light": "Svetlý",
     },
 }
 LANGS = {"English": "en", "Slovenčina": "sk"}
@@ -117,7 +119,8 @@ def load_settings() -> dict:
         d = {}
     return {"lang": d.get("lang", "en") if d.get("lang") in TEXTS else "en",
             "theme": d.get("theme", "dark") if d.get("theme") in ("dark", "light") else "dark",
-            "format": d.get("format", "png") if d.get("format") in FORMATS else "png"}
+            "format": d.get("format", "png") if d.get("format") in FORMATS else "png",
+            "zip": d.get("zip") is True}
 
 
 def save_settings(d: dict):
@@ -243,7 +246,13 @@ class App(ctk.CTk):
             self.popup, values=[f.upper() for f in FORMATS], command=self.on_format,
             selected_color=ACCENT, selected_hover_color=ACCENT_HOVER)
         self.fmt_seg.set(self.settings["format"].upper())
-        self.fmt_seg.pack(padx=16, pady=(0, 16), fill="x")
+        self.fmt_seg.pack(padx=16, fill="x")
+        self.zip_switch = ctk.CTkSwitch(self.popup, text="", command=self.on_zip,
+                                        progress_color=ACCENT)
+        if self.settings["zip"]:
+            self.zip_switch.select()
+        self.tr_widgets.append((self.zip_switch, "zip"))
+        self.zip_switch.pack(anchor="w", padx=16, pady=(14, 16))
         self.popup_open = False
 
     def toggle_settings(self):
@@ -271,6 +280,10 @@ class App(ctk.CTk):
 
     def on_format(self, value):
         self.settings["format"] = value.lower()
+        save_settings(self.settings)
+
+    def on_zip(self):
+        self.settings["zip"] = bool(self.zip_switch.get())
         save_settings(self.settings)
 
     def on_theme(self, value):
@@ -306,10 +319,11 @@ class App(ctk.CTk):
     def open_folder(self):
         if not self.target:
             return
+        folder = self.target.parent if self.target.is_file() else self.target
         if sys.platform.startswith("win"):
-            os.startfile(self.target)  # noqa: S606
+            os.startfile(folder)  # noqa: S606
         else:
-            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(self.target)])
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
 
     # ---------- extrakcia ----------
     def start(self):
@@ -327,13 +341,19 @@ class App(ctk.CTk):
             messagebox.showerror(self.t("err_title"), str(e))
             return
         # nový priečinok pomenovaný podľa PDF, pri kolízii s číslom
+        self.use_zip = self.settings["zip"]
+        suffix = ".zip" if self.use_zip else ""
         base = Path(out) / f"{pdf.stem}_extracted"
-        target, i = base, 1
+        target, i = Path(f"{base}{suffix}"), 1
         while target.exists():
             i += 1
-            target = Path(f"{base}_{i}")
-        target.mkdir(parents=True)
+            target = Path(f"{base}_{i}{suffix}")
         self.target = target
+        if self.use_zip:
+            self.workdir = Path(tempfile.mkdtemp(prefix="pdf_slides_"))  # dočasné PNG/JPG
+        else:
+            self.workdir = target
+            target.mkdir(parents=True)
 
         width = len(str(self.n))
         dpi = int(self.dpi_var.get())
@@ -346,9 +366,15 @@ class App(ctk.CTk):
         self.pool = ProcessPoolExecutor(max_workers=min(os.cpu_count() or 2, self.n),
                                         mp_context=mp.get_context("spawn"))
         self.futs = [self.pool.submit(_render, str(pdf), i, dpi,
-                                      str(target / f"slide_{i + 1:0{width}d}.{ext}"))
+                                      str(self.workdir / f"slide_{i + 1:0{width}d}.{ext}"))
                      for i in range(self.n)]
         self.after(50, self.poll)
+
+    def make_zip(self):
+        # obrázky sú už skomprimované, takže ZIP_STORED je rýchlejší bez väčšej straty
+        with zipfile.ZipFile(self.target, "w", zipfile.ZIP_STORED) as z:
+            for f in sorted(self.workdir.iterdir()):
+                z.write(f, f.name)
 
     def poll(self):
         done = sum(f.done() for f in self.futs)
@@ -362,9 +388,14 @@ class App(ctk.CTk):
         try:
             for f in self.futs:
                 f.result()
+            if self.use_zip:
+                self.make_zip()
         except Exception as e:  # noqa: BLE001
             self.set_status("error", RED, e=e)
             return
+        finally:
+            if self.use_zip:
+                shutil.rmtree(self.workdir, ignore_errors=True)
         self.set_status("done", GREEN, n=self.n, target=self.target)
         self.open_btn.pack(side="right")
 
